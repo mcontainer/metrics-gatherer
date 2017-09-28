@@ -12,7 +12,6 @@ import (
 	"github.com/rs/cors"
 	log "github.com/sirupsen/logrus"
 	"io"
-	"metrics-gatherer/sse"
 	"net/http"
 )
 
@@ -23,9 +22,9 @@ type dockerLog struct {
 
 var httpClient *http.Client // client for Docker API calls TODO(ArchangelX360): add TLS option
 var hostToCli map[string]*client.Client
-var containerIdToChan map[string]*chan sse.ContainerLogMessage
+var containerIdToChan map[string]*chan ContainerLogMessage
 
-func send(streamPipe *chan sse.ContainerLogMessage, logMessage []byte, isErrorMessage bool, containerInfo *pb.ContainerInfo) {
+func send(streamPipe *chan ContainerLogMessage, logMessage []byte, isErrorMessage bool, containerInfo *pb.ContainerInfo) {
 	dockerLog := dockerLog{
 		Message:        logMessage,
 		IsErrorMessage: isErrorMessage,
@@ -34,8 +33,8 @@ func send(streamPipe *chan sse.ContainerLogMessage, logMessage []byte, isErrorMe
 	if err != nil {
 		log.Fatal(err)
 	}
-	containerLogMessage := sse.ContainerLogMessage{
-		StreamId: sse.StreamId{
+	containerLogMessage := ContainerLogMessage{
+		StreamId: StreamId{
 			Host:        containerInfo.Host,
 			ContainerId: containerInfo.Id,
 		},
@@ -58,9 +57,9 @@ func createHostCliIfNotExists(info *pb.ContainerInfo) error {
 func createChanIfNotExists(info *pb.ContainerInfo) string {
 	streamId := info.Host + "-" + info.Id
 	if _, streamAlreadyExists := containerIdToChan[info.Id]; !streamAlreadyExists {
-		streamPipe := make(chan sse.ContainerLogMessage)
+		streamPipe := make(chan ContainerLogMessage)
 
-		go sse.Start(&streamPipe)
+		go StartSSE(&streamPipe)
 		containerIdToChan[info.Id] = &streamPipe
 
 		log.Infoln("Channel created for container: " + info.Id)
@@ -149,7 +148,7 @@ func closeSSEChannels() {
 }
 
 func main() {
-	containerIdToChan = make(map[string]*chan sse.ContainerLogMessage)
+	containerIdToChan = make(map[string]*chan ContainerLogMessage)
 	hostToCli = make(map[string]*client.Client)
 	defer closeDockerClients()
 	defer closeSSEChannels()

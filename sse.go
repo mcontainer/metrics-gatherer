@@ -39,7 +39,7 @@ func newSSE() *Broker {
 	return broker
 }
 
-func Start(streamer *chan ContainerLogMessage) {
+func StartSSE(streamer *chan ContainerLogMessage) {
 	log.Info("Starting Server sent event")
 	b := newSSE()
 	go func() {
