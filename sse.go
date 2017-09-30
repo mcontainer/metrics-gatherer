@@ -6,11 +6,13 @@ import (
 	"net/http"
 )
 
+const tokenLength = 25
+
 type Broker struct {
 	Notifier         chan ContainerLogMessage
-	incomingClients  chan *ContainerLogChannel
-	outcomingClients chan *ContainerLogChannel
-	clients          map[string]chan []byte
+	incomingClients  chan *ClientInfo
+	outcomingClients chan *ClientInfo
+	clients          map[string]map[string]chan []byte
 }
 
 type StreamId struct {
@@ -23,17 +25,18 @@ type ContainerLogMessage struct {
 	Message  []byte
 }
 
-type ContainerLogChannel struct {
-	StreamId StreamId
-	Channel  chan []byte
+type ClientInfo struct {
+	ClientToken string
+	StreamId    StreamId
+	Channel     chan []byte
 }
 
 func newSSE() *Broker {
 	broker := &Broker{
 		Notifier:         make(chan ContainerLogMessage, 1),
-		incomingClients:  make(chan *ContainerLogChannel),
-		outcomingClients: make(chan *ContainerLogChannel),
-		clients:          make(map[string]chan []byte),
+		incomingClients:  make(chan *ClientInfo),
+		outcomingClients: make(chan *ClientInfo),
+		clients:          make(map[string]map[string]chan []byte),
 	}
 	go broker.listen()
 	return broker
@@ -56,19 +59,28 @@ func (b *Broker) listen() {
 		select {
 		case x := <-b.incomingClients:
 			streamId := x.StreamId.Host + x.StreamId.ContainerId
-			// FIXME: this is not handling multiple clients, this should be a list of channel
-			b.clients[streamId] = x.Channel
+			if _, exists := b.clients[streamId]; !exists {
+				log.WithField("streamId", streamId).Debug("Creating multi-client map for container")
+				b.clients[streamId] = make(map[string]chan []byte)
+			}
+			b.clients[streamId][x.ClientToken] = x.Channel
 			log.WithField("clients size", len(b.clients)).Info("New client")
 		case x := <-b.outcomingClients:
 			streamId := x.StreamId.Host + x.StreamId.ContainerId
-			// FIXME: this should break stream for other clients that want logs for this streamId
-			delete(b.clients, streamId)
 			close(x.Channel)
+			delete(b.clients[streamId], x.ClientToken)
+			if len(b.clients[streamId]) == 0 {
+				log.WithField("streamId", streamId).Debug("No more clients listening to this container logs, deleting multi-client map entry")
+				delete(b.clients, streamId)
+			}
 			log.WithField("clients size", len(b.clients)).Info("Delete client")
 		case x := <-b.Notifier:
 			streamId := x.StreamId.Host + x.StreamId.ContainerId
 			if _, exists := b.clients[streamId]; exists {
-				b.clients[streamId] <- x.Message
+				for clientToken, clientChannel := range b.clients[streamId] {
+					log.WithField("clientToken", clientToken).Debug("Sending to client")
+					clientChannel <- x.Message
+				}
 			}
 		}
 	}
@@ -95,7 +107,8 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "missing containerId parameter", http.StatusBadRequest)
 	}
 
-	containerLogChannel := &ContainerLogChannel{
+	containerLogChannel := &ClientInfo{
+		ClientToken: generateToken(), // identify client through channel collections
 		StreamId: StreamId{
 			Host:        host,
 			ContainerId: containerId,
@@ -121,4 +134,8 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		flusher.Flush()
 	}
 
+}
+
+func generateToken() string {
+	return RandStringBytesMaskImprSrc(tokenLength)
 }

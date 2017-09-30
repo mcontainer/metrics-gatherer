@@ -34,7 +34,7 @@ func send(logMessage []byte, isErrorMessage bool, containerInfo *pb.ContainerInf
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.WithField("message", string(byteEncodedDockerLog)).Info("Sending message to channel")
+	log.WithField("message", string(byteEncodedDockerLog)).Debug("Sending message to channel")
 	containerLogMessage := ContainerLogMessage{
 		StreamId: StreamId{
 			Host:        containerInfo.Host,
