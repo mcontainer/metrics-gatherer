@@ -13,34 +13,36 @@ import (
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type dockerLog struct {
-	Message        []byte `json:"message,omitempty"`
+	Message        string `json:"message,omitempty"`
 	IsErrorMessage bool   `json:"isErrorMessage"`
 }
 
 var httpClient *http.Client // client for Docker API calls TODO(ArchangelX360): add TLS option
 var hostToCli map[string]*client.Client
-var containerIdToChan map[string]*chan ContainerLogMessage
+var streamPipe chan ContainerLogMessage
 
-func send(streamPipe *chan ContainerLogMessage, logMessage []byte, isErrorMessage bool, containerInfo *pb.ContainerInfo) {
+func send(logMessage []byte, isErrorMessage bool, containerInfo *pb.ContainerInfo) {
 	dockerLog := dockerLog{
-		Message:        logMessage,
+		Message:        string(logMessage),
 		IsErrorMessage: isErrorMessage,
 	}
-	d, err := json.Marshal(dockerLog)
+	byteEncodedDockerLog, err := json.Marshal(dockerLog)
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.WithField("message", string(byteEncodedDockerLog)).Info("Sending message to channel")
 	containerLogMessage := ContainerLogMessage{
 		StreamId: StreamId{
 			Host:        containerInfo.Host,
 			ContainerId: containerInfo.Id,
 		},
-		Message: d,
+		Message: byteEncodedDockerLog,
 	}
-	*streamPipe <- containerLogMessage
+	streamPipe <- containerLogMessage
 }
 
 func createHostCliIfNotExists(info *pb.ContainerInfo) error {
@@ -52,22 +54,6 @@ func createHostCliIfNotExists(info *pb.ContainerInfo) error {
 		hostToCli[info.Host] = cli
 	}
 	return nil
-}
-
-func createChanIfNotExists(info *pb.ContainerInfo) string {
-	streamId := info.Host + "-" + info.Id
-	if _, streamAlreadyExists := containerIdToChan[info.Id]; !streamAlreadyExists {
-		streamPipe := make(chan ContainerLogMessage)
-
-		go StartSSE(&streamPipe)
-		containerIdToChan[info.Id] = &streamPipe
-
-		log.Infoln("Channel created for container: " + info.Id)
-	} else {
-		log.Infoln("Channel already existing for container: " + info.Id)
-		log.Infoln("You can listen to it at: /logs/" + info.Id)
-	}
-	return streamId
 }
 
 func parseBodyToContainerInfo(bodyStream io.ReadCloser) (*pb.ContainerInfo, error) {
@@ -82,20 +68,19 @@ func parseBodyToContainerInfo(bodyStream io.ReadCloser) (*pb.ContainerInfo, erro
 	return &containerInfo, nil
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
+func startContainerLogging(w http.ResponseWriter, r *http.Request) {
 	containerInfo, err := parseBodyToContainerInfo(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Infoln("Requesting channel for logs of container: " + containerInfo.Id)
+	log.Info("Requesting channel for logs of container: " + containerInfo.Id)
 
 	if err := createHostCliIfNotExists(containerInfo); err != nil {
 		log.Errorf("error creating Docker client: %v", err)
 		return
 	}
-	streamId := createChanIfNotExists(containerInfo)
 
 	// FIXME: stop this co routine somewhere
 	go func(containerInfo *pb.ContainerInfo) {
@@ -105,7 +90,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			Follow:     true,
 		})
 		if err != nil {
-			log.Errorln(err)
+			log.Error(err)
 			return
 		}
 		defer reader.Close()
@@ -113,26 +98,30 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, err := reader.Read(hdr)
 			if err != nil {
-				log.Errorln(err)
+				log.Error(err)
 				return
 			}
 			isErrorMessage := hdr[0] != 1
 			count := binary.BigEndian.Uint32(hdr[4:])
 			dat := make([]byte, count)
 			_, err = reader.Read(dat)
+			trimedDat := strings.TrimSuffix(string(dat), "\n")
 			if isErrorMessage {
-				log.Errorln(string(dat))
+				log.Debug("[DOCKER ERROR] " + trimedDat)
 			} else {
-				log.Infoln(string(dat))
+				log.Debug(trimedDat)
 			}
 
-			send(containerIdToChan[containerInfo.Id], dat, isErrorMessage, containerInfo)
+			send(dat, isErrorMessage, containerInfo)
 		}
 	}(containerInfo)
 
-	streamIdJson := "{\"streamId\": \"" + streamId + "\"}"
+	encoder := json.NewEncoder(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	fmt.Fprintln(w, streamIdJson)
+	if err := encoder.Encode(containerInfo); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "{\"message\":\"error during containerInfo JSON parsing\"}")
+	}
 }
 
 func closeDockerClients() {
@@ -141,20 +130,17 @@ func closeDockerClients() {
 	}
 }
 
-func closeSSEChannels() {
-	for _, sseChannel := range containerIdToChan {
-		close(*sseChannel)
-	}
-}
-
 func main() {
-	containerIdToChan = make(map[string]*chan ContainerLogMessage)
-	hostToCli = make(map[string]*client.Client)
 	defer closeDockerClients()
-	defer closeSSEChannels()
+
+	log.SetLevel(log.DebugLevel)
+
+	hostToCli = make(map[string]*client.Client)
+	streamPipe = make(chan ContainerLogMessage)
+	go StartSSE(&streamPipe)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", handler)
+	mux.HandleFunc("/", startContainerLogging)
 	handler := cors.Default().Handler(mux)
 	http.ListenAndServe(":8090", handler)
 }

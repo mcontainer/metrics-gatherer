@@ -56,10 +56,12 @@ func (b *Broker) listen() {
 		select {
 		case x := <-b.incomingClients:
 			streamId := x.StreamId.Host + x.StreamId.ContainerId
+			// FIXME: this is not handling multiple clients, this should be a list of channel
 			b.clients[streamId] = x.Channel
 			log.WithField("clients size", len(b.clients)).Info("New client")
 		case x := <-b.outcomingClients:
 			streamId := x.StreamId.Host + x.StreamId.ContainerId
+			// FIXME: this should break stream for other clients that want logs for this streamId
 			delete(b.clients, streamId)
 			close(x.Channel)
 			log.WithField("clients size", len(b.clients)).Info("Delete client")
