@@ -1,0 +1,14 @@
+version: '3'
+services:
+  hello:
+    build:
+      context: .
+      args:
+        MESSAGE: hello
+        PERIODIC_REFRESH: 5
+  world:
+    build:
+      context: .
+      args:
+        MESSAGE: world
+        PERIODIC_REFRESH: 15
