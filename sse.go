@@ -20,11 +20,6 @@ type StreamId struct {
 	Host        string
 }
 
-type ContainerLogMessage struct {
-	StreamId StreamId
-	Message  []byte
-}
-
 type ClientInfo struct {
 	ClientToken string
 	StreamId    StreamId
