@@ -12,7 +12,7 @@ type Broker struct {
 	Notifier         chan ContainerLogMessage
 	incomingClients  chan *ClientInfo
 	outcomingClients chan *ClientInfo
-	clients          map[string]map[string]chan []byte
+	clients          map[StreamId]map[string]chan []byte
 }
 
 type StreamId struct {
@@ -31,7 +31,7 @@ func newSSE() *Broker {
 		Notifier:         make(chan ContainerLogMessage, 1),
 		incomingClients:  make(chan *ClientInfo),
 		outcomingClients: make(chan *ClientInfo),
-		clients:          make(map[string]map[string]chan []byte),
+		clients:          make(map[StreamId]map[string]chan []byte),
 	}
 	go broker.listen()
 	return broker
@@ -53,26 +53,23 @@ func (b *Broker) listen() {
 	for {
 		select {
 		case x := <-b.incomingClients:
-			streamId := x.StreamId.Host + x.StreamId.ContainerId
-			if _, exists := b.clients[streamId]; !exists {
-				log.WithField("streamId", streamId).Debug("Creating multi-client map for container")
-				b.clients[streamId] = make(map[string]chan []byte)
+			if _, exists := b.clients[x.StreamId]; !exists {
+				log.WithField("streamId", x.StreamId).Debug("Creating multi-client map for container")
+				b.clients[x.StreamId] = make(map[string]chan []byte)
 			}
-			b.clients[streamId][x.ClientToken] = x.Channel
+			b.clients[x.StreamId][x.ClientToken] = x.Channel
 			log.WithField("clients size", len(b.clients)).Info("New client")
 		case x := <-b.outcomingClients:
-			streamId := x.StreamId.Host + x.StreamId.ContainerId
 			close(x.Channel)
-			delete(b.clients[streamId], x.ClientToken)
-			if len(b.clients[streamId]) == 0 {
-				log.WithField("streamId", streamId).Debug("No more clients listening to this container logs, deleting multi-client map entry")
-				delete(b.clients, streamId)
+			delete(b.clients[x.StreamId], x.ClientToken)
+			if len(b.clients[x.StreamId]) == 0 {
+				log.WithField("streamId", x.StreamId).Debug("No more clients listening to this container logs, deleting multi-client map entry")
+				delete(b.clients, x.StreamId)
 			}
 			log.WithField("clients size", len(b.clients)).Info("Delete client")
 		case x := <-b.Notifier:
-			streamId := x.StreamId.Host + x.StreamId.ContainerId
-			if _, exists := b.clients[streamId]; exists {
-				for clientToken, clientChannel := range b.clients[streamId] {
+			if _, exists := b.clients[x.StreamId]; exists {
+				for clientToken, clientChannel := range b.clients[x.StreamId] {
 					log.WithField("clientToken", clientToken).Debug("Sending to client")
 					clientChannel <- x.Message
 				}

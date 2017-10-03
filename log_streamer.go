@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const logChannelTimeout = 5 * time.Second
+const logChannelTimeout = 15 * time.Minute
 
 type dockerLog struct {
 	Message        string `json:"message,omitempty"`
@@ -69,11 +69,7 @@ func (ls *LogStreamer) startContainerLogging(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-func (ls *LogStreamer) send(logMessage []byte, isErrorMessage bool, streamId *StreamId) {
-	dockerLog := dockerLog{
-		Message:        string(logMessage),
-		IsErrorMessage: isErrorMessage,
-	}
+func (ls *LogStreamer) send(dockerLog *dockerLog, streamId *StreamId) {
 	byteEncodedDockerLog, err := json.Marshal(dockerLog)
 	if err != nil {
 		log.Fatal(err)
@@ -99,8 +95,10 @@ func (ls *LogStreamer) createHostCliIfNotExists(info *pb.ContainerInfo) error {
 
 func (ls *LogStreamer) openLogStream(mapLock *sync.WaitGroup, parent context.Context, streamId *StreamId) {
 	defer ls.StreamsLock.Done()
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 
-	reader, err := ls.HostToCli[streamId.Host].ContainerLogs(context.Background(), streamId.ContainerId, types.ContainerLogsOptions{
+	reader, err := ls.HostToCli[streamId.Host].ContainerLogs(ctx, streamId.ContainerId, types.ContainerLogsOptions{
 		ShowStdout: true,
 		Follow:     true,
 	})
@@ -115,39 +113,59 @@ func (ls *LogStreamer) openLogStream(mapLock *sync.WaitGroup, parent context.Con
 	mapLock.Done()
 
 	hdr := make([]byte, 8)
+
+	logChan := make(chan *dockerLog)
+	defer close(logChan)
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				_, err := reader.Read(hdr)
+				if err != nil {
+					log.Error(err)
+					return
+				}
+				isErrorMessage := hdr[0] != 1
+				count := binary.BigEndian.Uint32(hdr[4:])
+				dat := make([]byte, count)
+				_, err = reader.Read(dat)
+				trimedDat := strings.TrimSuffix(string(dat), "\n")
+				if isErrorMessage {
+					log.Debug("[DOCKER ERROR] " + trimedDat)
+				} else {
+					log.Debug(trimedDat)
+				}
+				logChan <- &dockerLog{
+					Message:        string(dat),
+					IsErrorMessage: isErrorMessage,
+				}
+			}
+		}
+	}()
+
+	c := time.NewTicker(logChannelTimeout)
+	defer c.Stop()
 	for {
 		select {
 		case <-parent.Done():
+			// this might be overkill
 			delete(ls.OpenedStreams, *streamId)
 			log.WithField("streamId", streamId).Info("Closing channel, program killed")
 			return
-		case <-time.After(logChannelTimeout):
-			// closing stream if no more client AND timeout exceeded
-			if !false { // FIXME: now if there is still clients
-				delete(ls.OpenedStreams, *streamId)
-				log.WithField("streamId", streamId).Info("Log channel timed out")
-				return
-			} else {
-				log.WithField("streamId", streamId).Debug("Log channel timed out but there is still clients")
-			}
-		default:
-			_, err := reader.Read(hdr)
-			if err != nil {
-				log.Error(err)
-				return
-			}
-			isErrorMessage := hdr[0] != 1
-			count := binary.BigEndian.Uint32(hdr[4:])
-			dat := make([]byte, count)
-			_, err = reader.Read(dat)
-			trimedDat := strings.TrimSuffix(string(dat), "\n")
-			if isErrorMessage {
-				log.Debug("[DOCKER ERROR] " + trimedDat)
-			} else {
-				log.Debug(trimedDat)
-			}
-
-			ls.send(dat, isErrorMessage, streamId)
+		case <-c.C:
+			// closing stream when timeout exceeded
+			delete(ls.OpenedStreams, *streamId)
+			log.WithField("streamId", streamId).Info("Log channel timed out")
+			ls.send(&dockerLog{
+				Message:        "Log channel timed out",
+				IsErrorMessage: true,
+			}, streamId)
+			return
+		case dockerLog := <-logChan:
+			ls.send(dockerLog, streamId)
 		}
 	}
 }
@@ -157,6 +175,7 @@ func (ls *LogStreamer) close() {
 		// closing docker clients
 		dockerClient.Close()
 	}
+	// this might be overkill
 	ls.RootCancel()
 	ls.StreamsLock.Wait()
 }
