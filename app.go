@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"github.com/moby/moby/client"
+	"github.com/docker/docker/client"
 	"github.com/rs/cors"
 	log "github.com/sirupsen/logrus"
 	"net/http"
