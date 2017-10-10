@@ -102,6 +102,7 @@ func (ls *LogStreamer) openLogStream(mapLock *sync.WaitGroup, parent context.Con
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
+		Timestamps: true,
 	})
 	if err != nil {
 		log.Error(err)
