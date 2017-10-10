@@ -100,6 +100,7 @@ func (ls *LogStreamer) openLogStream(mapLock *sync.WaitGroup, parent context.Con
 
 	reader, err := ls.HostToCli[streamId.Host].ContainerLogs(ctx, streamId.ContainerId, types.ContainerLogsOptions{
 		ShowStdout: true,
+		ShowStderr: true,
 		Follow:     true,
 	})
 	if err != nil {
